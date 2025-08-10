@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
+<title>Cosmic Surfer — 2D Mobile v2</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;touch-action:none}
+  canvas{display:block}
+  .hud{position:fixed;left:50%;top:8px;transform:translateX(-50%);color:#fff;
+       font-family:system-ui,Segoe UI,Roboto,Arial;font-weight:600;font-size:14px;
+       padding:6px 12px;border-radius:999px;background:rgba(0,0,0,.35);backdrop-filter:blur(6px);}
+  .joystick{position:fixed;left:16px;bottom:16px;width:140px;height:140px;touch-action:none}
+  .stick{position:absolute;left:0;top:0;right:0;bottom:0;border-radius:999px;background:rgba(255,255,255,.06);
+         border:2px solid rgba(255,255,255,.15);}
+  .knob{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:72px;height:72px;border-radius:999px;
+        background:rgba(180,220,255,.25);border:2px solid rgba(180,220,255,.6);box-shadow:0 8px 22px rgba(0,0,0,.35);}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="hud" id="hud">Безграничное пространство • Джойстик слева</div>
+
+<div class="joystick" id="joy">
+  <div class="stick"></div>
+  <div class="knob" id="knob"></div>
+</div>
+
+<script>
+(() => {
+  const cvs = document.getElementById('c');
+  const ctx = cvs.getContext('2d');
+  const hud = document.getElementById('hud');
+  const DPR = Math.min(2, window.devicePixelRatio || 1);
+
+  function resize(){
+    const w = window.innerWidth, h = window.innerHeight;
+    cvs.width = Math.floor(w * DPR);
+    cvs.height = Math.floor(h * DPR);
+    cvs.style.width = w + 'px';
+    cvs.style.height = h + 'px';
+    ctx.setTransform(DPR,0,0,DPR,0,0);
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // --- Input: keyboard + joystick ---
+  const keys = {w:false,a:false,s:false,d:false};
+  window.addEventListener('keydown', e=>{
+    const k = e.key.toLowerCase();
+    if (k==='w' || k==='arrowup') keys.w = true;
+    if (k==='s' || k==='arrowdown') keys.s = true;
+    if (k==='a' || k==='arrowleft') keys.a = true;
+    if (k==='d' || k==='arrowright') keys.d = true;
+  });
+  window.addEventListener('keyup', e=>{
+    const k = e.key.toLowerCase();
+    if (k==='w' || k==='arrowup') keys.w = false;
+    if (k==='s' || k==='arrowdown') keys.s = false;
+    if (k==='a' || k==='arrowleft') keys.a = false;
+    if (k==='d' || k==='arrowright') keys.d = false;
+  });
+
+  // Touch joystick
+  const joy = document.getElementById('joy');
+  const knob = document.getElementById('knob');
+  let joyActive = false, joyVec = {x:0,y:0};
+  function setKnob(x,y){ knob.style.left = x+'px'; knob.style.top=y+'px'; }
+  function joyMove(clientX, clientY){
+    const r = joy.getBoundingClientRect();
+    const cx = r.left + r.width/2, cy = r.top + r.height/2;
+    let dx = clientX - cx, dy = clientY - cy;
+    const max = r.width*0.36;
+    const len = Math.hypot(dx,dy);
+    const k = len>max ? max/len : 1;
+    dx *= k; dy *= k;
+    setKnob(r.width/2 + dx, r.height/2 + dy);
+    joyVec.x = (dx/max) || 0;
+    joyVec.y = (dy/max) || 0;
+  }
+  function joyEnd(){
+    const r = joy.getBoundingClientRect();
+    setKnob(r.width/2, r.height/2);
+    joyVec.x = joyVec.y = 0;
+  }
+  joy.addEventListener('pointerdown', e=>{ e.preventDefault(); joy.setPointerCapture(e.pointerId); joyMove(e.clientX,e.clientY); });
+  joy.addEventListener('pointermove', e=>{ if (e.pressure===0) return; e.preventDefault(); joyMove(e.clientX,e.clientY); });
+  joy.addEventListener('pointerup',   e=>{ e.preventDefault(); joy.releasePointerCapture(e.pointerId); joyEnd(); });
+  joy.addEventListener('pointercancel', e=>{ e.preventDefault(); joyEnd(); });
+
+  // --- World (infinite) ---
+  const cam = {x:0, y:0}; // camera tracks player
+  const player = {
+    x: 0, y: 0, vx: 0, vy: 0,
+    angle: 0, flyBlend: 0,
+    w: 80, h: 26 // smaller sprite
+  };
+
+  // Stars: fixed in world, not auto-moving. Recycle outside radius.
+  const STAR_RADIUS = 3000;   // how far around camera we keep stars
+  const STAR_COUNT = 220;     // moderate density
+  const stars = [];
+  function spawnStarAround(cx, cy){
+    const a = Math.random()*Math.PI*2;
+    const r = Math.random()*STAR_RADIUS;
+    return {x: cx + Math.cos(a)*r, y: cy + Math.sin(a)*r, s: Math.random()<0.8?1:2, c: Math.random()<0.5?'#fff':'#cfe6ff'};
+  }
+  function initStars(){
+    stars.length = 0;
+    for (let i=0;i<STAR_COUNT;i++) stars.push(spawnStarAround(cam.x, cam.y));
+  }
+  initStars();
+
+  function inputVector(){
+    let x = (keys.d?1:0) + (keys.a?-1:0) + joyVec.x;
+    let y = (keys.s?1:0) + (keys.w?-1:0) + joyVec.y;
+    const len = Math.hypot(x,y);
+    if (len>1) { x/=len; y/=len; }
+    return {x,y};
+  }
+
+  function update(dt){
+    // Movement physics (no map boundaries)
+    const v = inputVector();
+    const accel = 1200, drag = 0.90, maxSpeed = 700;
+    player.vx += v.x * accel * dt;
+    player.vy += v.y * accel * dt;
+    let speed = Math.hypot(player.vx, player.vy);
+    if (speed > maxSpeed){
+      player.vx = player.vx / speed * maxSpeed;
+      player.vy = player.vy / speed * maxSpeed;
+      speed = maxSpeed;
+    }
+    if (v.x===0 && v.y===0){ player.vx *= drag; player.vy *= drag; }
+
+    player.x += player.vx * dt;
+    player.y += player.vy * dt;
+
+    // Camera follows player (centered)
+    cam.x = player.x;
+    cam.y = player.y;
+
+    // Blend idle <-> fly and tilt
+    const targetBlend = Math.min(1, Math.hypot(player.vx, player.vy) / 300);
+    player.flyBlend += (targetBlend - player.flyBlend) * Math.min(1, dt*6);
+    const targetAngle = Math.atan2(player.vy, player.vx || 1e-6) * 0.15 * player.flyBlend;
+    player.angle += (targetAngle - player.angle) * Math.min(1, dt*6);
+
+    // Recycle stars that are too far from camera (to simulate infinite, but stars themselves are static)
+    for (let i=0;i<stars.length;i++){
+      const s = stars[i];
+      const dx = s.x - cam.x, dy = s.y - cam.y;
+      if (dx*dx + dy*dy > (STAR_RADIUS*STAR_RADIUS)){
+        stars[i] = spawnStarAround(cam.x, cam.y);
+      }
+    }
+  }
+
+  function draw(){
+    const W = window.innerWidth, H = window.innerHeight;
+
+    // Pure black background
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0,0,W,H);
+
+    // Draw stars in world space -> screen with camera offset
+    const ox = W/2 - cam.x;
+    const oy = H/2 - cam.y;
+    for (const s of stars){
+      ctx.fillStyle = s.c;
+      ctx.fillRect(s.x + ox, s.y + oy, s.s, s.s);
+    }
+
+    // Draw surfer at screen center (since camera is centered on him)
+    ctx.save();
+    ctx.translate(W/2, H/2);
+    ctx.rotate(player.angle);
+
+    const blend = player.flyBlend;
+    const boardLen = player.w * (1 + 0.1*blend);
+    const boardThk = player.h * (0.9 - 0.2*blend);
+
+    // glow
+    ctx.globalAlpha = 0.25; ctx.fillStyle = '#9bd7ff';
+    ctx.beginPath(); ctx.ellipse(0, boardThk*0.6, boardLen*0.65, boardThk*0.55, 0, 0, Math.PI*2); ctx.fill(); ctx.globalAlpha = 1;
+
+    // board
+    roundRect(-boardLen/2, -boardThk/2, boardLen, boardThk, boardThk/2);
+    const grd = ctx.createLinearGradient(-boardLen/2, 0, boardLen/2, 0);
+    grd.addColorStop(0,'#dfe7ff'); grd.addColorStop(1,'#bcd1ff'); ctx.fillStyle = grd; ctx.fill();
+
+    // body
+    ctx.fillStyle = '#e9f1ff';
+    const torsoH = 28 + 8*blend, torsoW = 12;
+    roundRect(-torsoW/2, -torsoH - 6, torsoW, torsoH, 6); ctx.fill();
+    // head
+    ctx.beginPath(); ctx.arc(0, -torsoH - 10, 8, 0, Math.PI*2); ctx.fill();
+    // arms
+    ctx.save(); ctx.translate(0, -torsoH + 6);
+    const armAngBase = Math.PI*0.5; const armDelta = 0.9*blend;
+    drawArm( armAngBase - armDelta); drawArm(-armAngBase + armDelta);
+    ctx.restore();
+    // legs hint
+    ctx.fillStyle = '#dfe7ff'; roundRect(-11, -9, 22, 9, 4);
+    ctx.fillRect(-8, -12, 5, 3); ctx.fillRect(3, -12, 5, 3);
+
+    ctx.restore();
+
+    hud.textContent = 'Скорость: ' + Math.round(Math.hypot(player.vx, player.vy)) + ' • Бесконечная карта, камера за персонажем';
+  }
+
+  function drawArm(angle){
+    ctx.save();
+    ctx.rotate(angle);
+    roundRect(0, -5, 20, 6, 3); ctx.fill(); // upper
+    ctx.translate(20, -2); ctx.rotate(0.25);
+    roundRect(0, -3, 16, 5, 3); ctx.fill(); // forearm
+    ctx.translate(16, -1); ctx.beginPath(); ctx.arc(0,0,3,0,Math.PI*2); ctx.fill();
+    ctx.restore();
+  }
+
+  function roundRect(x,y,w,h,r){
+    r = Math.min(r, w/2, h/2);
+    ctx.beginPath();
+    ctx.moveTo(x+r,y);
+    ctx.arcTo(x+w,y,x+w,y+h,r);
+    ctx.arcTo(x+w,y+h,x,y+h,r);
+    ctx.arcTo(x,y+h,x,y,r);
+    ctx.arcTo(x,y,x+w,y,r);
+    ctx.closePath();
+  }
+
+  // Main loop
+  let last = performance.now();
+  function loop(t){
+    const dt = Math.min(0.033, (t-last)/1000); last = t;
+    update(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+
+  // focus on tap
+  cvs.addEventListener('pointerdown', ()=>cvs.focus());
+})();
+</script>
+</body>
+</html>
