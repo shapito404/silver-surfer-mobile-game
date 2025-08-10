@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
+<title>Cosmic Surfer — 2D Mobile</title>
+<style>
+  html,body{margin:0;height:100%;background:#070b16;overflow:hidden;touch-action:none}
+  canvas{display:block}
+  .hud{position:fixed;left:50%;top:8px;transform:translateX(-50%);color:#fff;
+       font-family:system-ui,Segoe UI,Roboto,Arial;font-weight:600;font-size:14px;
+       padding:6px 12px;border-radius:999px;background:rgba(0,0,0,.25);backdrop-filter:blur(6px);}
+  .joystick{position:fixed;left:16px;bottom:16px;width:140px;height:140px;touch-action:none}
+  .stick{position:absolute;left:0;top:0;right:0;bottom:0;border-radius:999px;background:rgba(255,255,255,.06);
+         border:2px solid rgba(255,255,255,.15);}
+  .knob{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:72px;height:72px;border-radius:999px;
+        background:rgba(180,220,255,.25);border:2px solid rgba(180,220,255,.6);box-shadow:0 8px 22px rgba(0,0,0,.35);}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="hud" id="hud">W/S/A/D или джойстик • Нажми на сцену</div>
+
+<!-- On-screen joystick -->
+<div class="joystick" id="joy">
+  <div class="stick"></div>
+  <div class="knob" id="knob"></div>
+</div>
+
+<script>
+(() => {
+  const cvs = document.getElementById('c');
+  const ctx = cvs.getContext('2d');
+  const hud = document.getElementById('hud');
+  const DPR = Math.min(2, window.devicePixelRatio || 1);
+
+  function resize(){
+    const w = window.innerWidth, h = window.innerHeight;
+    cvs.width = Math.floor(w * DPR);
+    cvs.height = Math.floor(h * DPR);
+    cvs.style.width = w + 'px';
+    cvs.style.height = h + 'px';
+    ctx.setTransform(DPR,0,0,DPR,0,0);
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // --- Input: keyboard + joystick ---
+  const keys = {w:false,a:false,s:false,d:false};
+  window.addEventListener('keydown', e=>{
+    const k = e.key.toLowerCase();
+    if (k==='w' || k==='arrowup') keys.w = true;
+    if (k==='s' || k==='arrowdown') keys.s = true;
+    if (k==='a' || k==='arrowleft') keys.a = true;
+    if (k==='d' || k==='arrowright') keys.d = true;
+  });
+  window.addEventListener('keyup', e=>{
+    const k = e.key.toLowerCase();
+    if (k==='w' || k==='arrowup') keys.w = false;
+    if (k==='s' || k==='arrowdown') keys.s = false;
+    if (k==='a' || k==='arrowleft') keys.a = false;
+    if (k==='d' || k==='arrowright') keys.d = false;
+  });
+
+  // Touch joystick
+  const joy = document.getElementById('joy');
+  const knob = document.getElementById('knob');
+  let joyActive = false, joyVec = {x:0,y:0};
+  function joyCenter(){ const r = joy.getBoundingClientRect(); return {x:r.left + r.width/2, y:r.top + r.height/2, r:r.width/2}; }
+  function setKnob(x,y){ knob.style.left = x+'px'; knob.style.top=y+'px'; }
+  function joyStart(clientX, clientY){
+    joyActive = true;
+    const r = joy.getBoundingClientRect();
+    const cx = r.width/2, cy = r.height/2;
+    setKnob(cx, cy);
+  }
+  function joyMove(clientX, clientY){
+    const r = joy.getBoundingClientRect();
+    const cx = r.left + r.width/2, cy = r.top + r.height/2;
+    let dx = clientX - cx, dy = clientY - cy;
+    const max = r.width*0.36;
+    const len = Math.hypot(dx,dy);
+    const k = len>max ? max/len : 1;
+    dx *= k; dy *= k;
+    setKnob(r.width/2 + dx, r.height/2 + dy);
+    joyVec.x = (dx/max) || 0;
+    joyVec.y = (dy/max) || 0;
+  }
+  function joyEnd(){
+    joyActive = false;
+    const r = joy.getBoundingClientRect();
+    setKnob(r.width/2, r.height/2);
+    joyVec.x = joyVec.y = 0;
+  }
+  // Pointer events
+  joy.addEventListener('pointerdown', e=>{ e.preventDefault(); joy.setPointerCapture(e.pointerId); joyStart(e.clientX,e.clientY); joyMove(e.clientX,e.clientY); });
+  joy.addEventListener('pointermove', e=>{ if (!joyActive) return; e.preventDefault(); joyMove(e.clientX,e.clientY); });
+  joy.addEventListener('pointerup',   e=>{ e.preventDefault(); joy.releasePointerCapture(e.pointerId); joyEnd(); });
+  joy.addEventListener('pointercancel', e=>{ e.preventDefault(); joyEnd(); });
+
+  // --- World ---
+  const world = {
+    t: 0,
+    stars: [], // parallax layers
+  };
+  // Stars (moderate density)
+  function spawnStars(){
+    world.stars.length = 0;
+    const layers = [
+      {n: 70,  speed: 12, size:[1,2], color:'rgba(255,255,255,0.9)'},
+      {n: 50,  speed: 24, size:[1,2], color:'rgba(200,230,255,0.8)'},
+      {n: 30,  speed: 40, size:[1,2], color:'rgba(180,220,255,0.8)'},
+    ];
+    for (const L of layers){
+      const arr = [];
+      for (let i=0;i<L.n;i++){
+        arr.push({x: Math.random()*cvs.width/DPR, y: Math.random()*cvs.height/DPR, s: Math.random()*(L.size[1]-L.size[0])+L.size[0]});
+      }
+      world.stars.push({cfg:L, items:arr});
+    }
+  }
+  spawnStars();
+
+  // --- Player (Cosmic Surfer, 2D vector art) ---
+  const player = {
+    x: window.innerWidth*0.5,
+    y: window.innerHeight*0.6,
+    vx: 0, vy: 0,
+    angle: 0, // visual tilt
+    flyBlend: 0, // 0 = idle, 1 = fly
+    w: 120, h: 40, // board size
+  };
+
+  function inputVector(){
+    // Merge keyboard and joystick
+    let x = (keys.d?1:0) + (keys.a?-1:0) + joyVec.x;
+    let y = (keys.s?1:0) + (keys.w?-1:0) + joyVec.y;
+    // clamp
+    const len = Math.hypot(x,y);
+    if (len>1) { x/=len; y/=len; }
+    return {x,y};
+  }
+
+  function update(dt){
+    world.t += dt;
+
+    // Move stars
+    for (const layer of world.stars){
+      const spd = layer.cfg.speed;
+      for (const s of layer.items){
+        s.x -= spd*dt; // left
+        if (s.x < -2) { s.x = window.innerWidth + Math.random()*60; s.y = Math.random()*window.innerHeight; }
+      }
+    }
+
+    // Input -> velocity
+    const v = inputVector();
+    const accel = 1200;
+    const drag = 0.90;
+    const maxSpeed = 600;
+
+    player.vx += v.x * accel * dt;
+    player.vy += v.y * accel * dt;
+
+    // Clamp speed
+    let speed = Math.hypot(player.vx, player.vy);
+    if (speed > maxSpeed){
+      player.vx = player.vx / speed * maxSpeed;
+      player.vy = player.vy / speed * maxSpeed;
+      speed = maxSpeed;
+    }
+    // Friction if no input
+    if (v.x===0 && v.y===0){
+      player.vx *= drag;
+      player.vy *= drag;
+    }
+
+    player.x += player.vx * dt;
+    player.y += player.vy * dt;
+
+    // Boundaries
+    const margin = 20;
+    player.x = Math.max(margin, Math.min(window.innerWidth - margin, player.x));
+    player.y = Math.max(margin, Math.min(window.innerHeight - margin, player.y));
+
+    // Blend idle <-> fly by speed
+    const targetBlend = Math.min(1, Math.hypot(player.vx, player.vy) / 300);
+    player.flyBlend += (targetBlend - player.flyBlend) * Math.min(1, dt*6);
+
+    // Visual tilt follows direction
+    const targetAngle = Math.atan2(player.vy, player.vx || 1e-6) * 0.15 * player.flyBlend;
+    player.angle += (targetAngle - player.angle) * Math.min(1, dt*6);
+  }
+
+  function draw() {
+    // BG gradient
+    const w = window.innerWidth, h = window.innerHeight;
+    const g = ctx.createRadialGradient(w*0.6,h*0.2,80, w*0.5,h*0.5, Math.max(w,h));
+    g.addColorStop(0,'#0b1030');
+    g.addColorStop(1,'#070b16');
+    ctx.fillStyle = g; ctx.fillRect(0,0,w,h);
+
+    // Stars
+    for (const layer of world.stars){
+      ctx.fillStyle = layer.cfg.color;
+      for (const s of layer.items){
+        ctx.fillRect(s.x, s.y, s.s, s.s);
+      }
+    }
+
+    // Surfer (2D vector — homage, без явных логотипов)
+    ctx.save();
+    ctx.translate(player.x, player.y);
+    ctx.rotate(player.angle);
+
+    const blend = player.flyBlend; // 0 idle -> 1 fly
+    const boardLen = player.w * (1 + 0.1*blend);
+    const boardThk = player.h * (0.9 - 0.2*blend);
+
+    // Shadow/glow
+    ctx.globalAlpha = 0.28;
+    ctx.fillStyle = '#9bd7ff';
+    ctx.beginPath();
+    ctx.ellipse(0, boardThk*0.6, boardLen*0.65, boardThk*0.55, 0, 0, Math.PI*2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+    // Board
+    roundRect(-boardLen/2, -boardThk/2, boardLen, boardThk, boardThk/2);
+    const grd = ctx.createLinearGradient(-boardLen/2, 0, boardLen/2, 0);
+    grd.addColorStop(0,'#dfe7ff'); grd.addColorStop(1,'#bcd1ff');
+    ctx.fillStyle = grd; ctx.fill();
+
+    // Character body
+    ctx.fillStyle = '#e9f1ff';
+    const torsoH = 36 + 10*blend;
+    const torsoW = 16;
+    roundRect(-torsoW/2, -torsoH - 6, torsoW, torsoH, 8);
+    ctx.fill();
+
+    // Head
+    ctx.beginPath();
+    ctx.arc(0, -torsoH - 12, 10, 0, Math.PI*2);
+    ctx.fill();
+
+    // Arms (idle vs fly)
+    ctx.save();
+    ctx.translate(0, -torsoH + 8);
+    const armAngBase = Math.PI*0.5;
+    const armDelta = 0.9*blend; // поднятие рук в полёте
+    drawArm( armAngBase - armDelta,  1);
+    drawArm(-armAngBase + armDelta, -1);
+    ctx.restore();
+
+    // Legs (не ярко выражены — силуэт)
+    ctx.fillStyle = '#dfe7ff';
+    roundRect(-14, -10, 28, 10, 5);
+    // small shin hints
+    ctx.fillRect(-10, -14, 6, 4);
+    ctx.fillRect(  4, -14, 6, 4);
+
+    ctx.restore();
+
+    // tiny UI
+    hud.textContent = 'Скорость: ' + Math.round(Math.hypot(player.vx, player.vy)) + '  •  Нажми в сцену и двигай джойстик';
+  }
+
+  function drawArm(angle, side){
+    ctx.save();
+    ctx.rotate(angle);
+    // upper arm
+    roundRect(0, -6, 26, 8, 4); ctx.fill();
+    // forearm
+    ctx.translate(26, -2);
+    ctx.rotate(0.25); // небольшой изгиб
+    roundRect(0, -4, 22, 6, 3); ctx.fill();
+    // hand
+    ctx.translate(22, -1);
+    ctx.beginPath(); ctx.arc(0, 0, 3.5, 0, Math.PI*2); ctx.fill();
+    ctx.restore();
+  }
+
+  function roundRect(x,y,w,h,r){
+    r = Math.min(r, w/2, h/2);
+    ctx.beginPath();
+    ctx.moveTo(x+r,y);
+    ctx.arcTo(x+w,y,x+w,y+h,r);
+    ctx.arcTo(x+w,y+h,x,y+h,r);
+    ctx.arcTo(x,y+h,x,y,r);
+    ctx.arcTo(x,y,x+w,y,r);
+    ctx.closePath();
+  }
+
+  // Main loop
+  let last = performance.now();
+  function loop(t){
+    const dt = Math.min(0.033, (t-last)/1000); last = t;
+    update(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+
+  // focus on tap (for mobile keyboards prevention)
+  cvs.addEventListener('pointerdown', ()=>cvs.focus());
+
+})();
+</script>
+</body>
+</html>
